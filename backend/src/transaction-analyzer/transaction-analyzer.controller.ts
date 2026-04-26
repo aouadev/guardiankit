@@ -1,6 +1,9 @@
 import { Body, Controller, Post } from '@nestjs/common';
+import { ApiBody, ApiTags } from '@nestjs/swagger';
 import { TransactionAnalyzerService } from './transaction-analyzer.service';
+import { AnalyzeTransactionDto } from './dto/analyze-transaction.dto';
 
+@ApiTags('TransactionAnalyzer')
 @Controller('transaction-analyzer')
 export class TransactionAnalyzerController {
   constructor(
@@ -8,7 +11,8 @@ export class TransactionAnalyzerController {
   ) {}
 
   @Post('analyze')
-  analyzeTransaction(@Body() body: { transactionData: string }) {
+  @ApiBody({ type: AnalyzeTransactionDto })
+  analyzeTransaction(@Body() body: AnalyzeTransactionDto) {
     return this.transactionAnalyzerService.analyze(body.transactionData);
   }
 }
