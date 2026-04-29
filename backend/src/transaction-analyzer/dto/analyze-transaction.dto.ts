@@ -5,5 +5,5 @@ export class AnalyzeTransactionDto {
     example: 'approve 0x123 unlimited',
     description: 'Transaction data or transaction description to analyze',
   })
-  transactionData: string;
+  transactionData!: string;
 }
