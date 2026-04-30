@@ -4,6 +4,9 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TransactionAnalyzerModule } from './transaction-analyzer/transaction-analyzer.module';
 import { OgStorageModule } from './og-storage/og-storage.module';
+import { InftService } from './inft/inft.service';
+import { InftController } from './inft/inft.controller';
+import { InftModule } from './inft/inft.module';
 
 @Module({
   imports: [
@@ -12,8 +15,9 @@ import { OgStorageModule } from './og-storage/og-storage.module';
     }),
     TransactionAnalyzerModule,
     OgStorageModule,
+    InftModule,
   ],
-  controllers: [AppController],
-  providers: [AppService],
+  controllers: [AppController, InftController],
+  providers: [AppService, InftService],
 })
 export class AppModule {}
