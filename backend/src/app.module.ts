@@ -7,6 +7,7 @@ import { OgStorageModule } from './og-storage/og-storage.module';
 import { InftService } from './inft/inft.service';
 import { InftController } from './inft/inft.controller';
 import { InftModule } from './inft/inft.module';
+import { LlmModule } from './llm/llm.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { InftModule } from './inft/inft.module';
     TransactionAnalyzerModule,
     OgStorageModule,
     InftModule,
+    LlmModule,
   ],
   controllers: [AppController, InftController],
   providers: [AppService, InftService],

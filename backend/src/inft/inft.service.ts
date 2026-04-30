@@ -8,13 +8,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { ethers } from 'ethers';
 import { OgStorageService } from '../og-storage/og-storage.service';
+import { LlmRouterService } from '../llm/llm-router.service';
+import { AnalysisResultDto } from '../llm/dto/analysis-result.dto';
+import { AnalyzeTransactionDto } from './dto/analyze-transaction.dto';
+import { AgentMemory } from './interfaces/agent-memory.interface';
 import GuardianINFTArtifact from './abi/GuardianINFT.json';
 import { CreateGuardianDto } from './dto/create-guardian.dto';
 import {
   CreateGuardianResponseDto,
   InftInfoDto,
 } from './dto/inft-response.dto';
-
 @Injectable()
 export class InftService implements OnModuleInit {
   private readonly logger = new Logger(InftService.name);
@@ -25,6 +28,7 @@ export class InftService implements OnModuleInit {
   constructor(
     private readonly configService: ConfigService,
     private readonly ogStorageService: OgStorageService,
+    private readonly llmRouter: LlmRouterService,
   ) {}
 
   onModuleInit() {
@@ -67,7 +71,7 @@ export class InftService implements OnModuleInit {
       const nextTokenId = Number(totalMinted) + 1;
 
       // 3. Build initial memory JSON
-      const memory = {
+      const memory: AgentMemory = {
         agentName: dto.agentName ?? `Sentinel #${nextTokenId}`,
         version: '1.0.0',
         createdAt: new Date().toISOString(),
@@ -177,5 +181,77 @@ export class InftService implements OnModuleInit {
       );
     }
     return this.ogStorageService.downloadJson(info.encryptedURI);
+  }
+
+  /**
+   * Analyzes a transaction using the iNFT's memory + LLM.
+   * The agent reads its memory from 0G Storage, then asks the LLM for a verdict.
+   */
+  async analyzeTransaction(
+    tokenId: number,
+    txData: AnalyzeTransactionDto,
+  ): Promise<AnalysisResultDto> {
+    this.logger.log(`Analyzing transaction for Guardian #${tokenId}`);
+
+    // 1. Récupère la mémoire de l'agent depuis 0G Storage
+    let memory: AgentMemory;
+    try {
+      const rawMemory = await this.getInftMemory(tokenId);
+      memory = rawMemory as AgentMemory; // cast: la mémoire qu'on upload respecte cette structure
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new NotFoundException(
+        `Cannot load memory for Guardian #${tokenId}: ${message}`,
+      );
+    }
+
+    // 2. Construit le prompt
+    const prompt = this.buildAnalysisPrompt(memory, txData);
+    this.logger.log(`Built prompt (${prompt.length} chars), calling LLM...`);
+
+    // 3. Appelle le LLM via le router
+    const result = await this.llmRouter.analyze(prompt);
+
+    this.logger.log(
+      `LLM verdict: ${result.verdict} (provider: ${result.providerUsed}, ${result.responseTimeMs}ms)`,
+    );
+
+    return result;
+  }
+
+  /**
+   * Builds the prompt for the LLM, combining the agent's memory and the transaction data.
+   */
+  private buildAnalysisPrompt(
+    memory: AgentMemory,
+    txData: AnalyzeTransactionDto,
+  ): string {
+    const knownSafe = memory.knowledgeBase.knownSafeContracts;
+    const knownScams = memory.knowledgeBase.knownScams;
+    const stats = memory.stats;
+
+    return `${memory.systemPrompt}
+
+# YOUR MEMORY (from previous experience)
+- Total transactions analyzed so far: ${stats.totalAnalyses}
+- Scams blocked: ${stats.scamsBlocked}
+- Experience level: ${stats.experienceLevel}
+- Known SAFE contracts: ${knownSafe.length > 0 ? knownSafe.join(', ') : '(none yet)'}
+- Known SCAM contracts: ${knownScams.length > 0 ? knownScams.join(', ') : '(none yet)'}
+
+# TRANSACTION TO ANALYZE
+- Target contract: ${txData.contractAddress}
+- Function: ${txData.functionCall}
+- Value (wei): ${txData.value}
+${txData.decodedParams ? `- Decoded params: ${txData.decodedParams}` : ''}
+${txData.contractContext ? `- Contract context: ${txData.contractContext}` : ''}
+
+# YOUR TASK
+Analyze this transaction. Consider:
+- Is the contract address known safe or scam from memory?
+- Is the function call risky (e.g., unlimited approval, transferFrom to suspicious address)?
+- Are there red flags (unverified contract, fresh deployment, unusual params)?
+
+Respond with a JSON object: {"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "1-2 sentences", "confidence": 0.0-1.0}`;
   }
 }
