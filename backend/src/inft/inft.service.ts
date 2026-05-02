@@ -340,15 +340,39 @@ Important rules:
       );
     }
 
+    // 🔹 enrich token (déjà existant)
     const enriched = await this.transactionEnricher.enrich(
       txData.tokenAddress,
       'approve(address,uint256)',
       { spender: txData.spender, amount: txData.amount },
     );
 
+    // 🔹 NOUVEAU : enrich spender (safe avec try/catch)
+    let spenderSummary = 'No additional data about spender.';
+    try {
+      const spenderInfo = await this.transactionEnricher.enrich(
+        txData.spender,
+        'contract_info',
+        {},
+      );
+      spenderSummary = spenderInfo.summary;
+      console.log('====== SPENDER SUMMARY ======');
+      console.log(spenderSummary);
+      console.log('=============================');
+    } catch (e) {
+      // fallback silencieux → ne casse rien
+      this.logger.warn(`Failed to enrich spender: ${txData.spender}`);
+    }
+
     return `# TRANSACTION TYPE: ERC-20 Approve
 
+# TOKEN INFO
 ${enriched.summary}
+
+# SPENDER INFO
+${spenderSummary}
+
+- Spender address: ${txData.spender}
 
 Note: This is an ERC-20 approval.
 The user gives permission to a spender to use tokens later.
@@ -357,7 +381,13 @@ Important rules:
 - Unlimited approval to an unknown or unverified spender => DANGER.
 - Unlimited approval to a well-known trusted protocol => WARNING, not DANGER.
 - Limited approval to a known protocol => SAFE or WARNING.
-- DANGER must be used only when the spender is unknown, suspicious, unverified, or matches scam patterns.`;
+- DANGER must be used only when the spender is unknown, suspicious, unverified, or matches scam patterns.
+
+Important:
+- The spender is the most critical part of an approval.
+- If the spender is a known DeFi protocol (Uniswap, etc.), do NOT classify as DANGER by default.
+- If the spender is unknown AND approval is unlimited → DANGER.
+`;
   }
 
   /**
@@ -481,15 +511,26 @@ Respond only with a JSON object:
     } else if (memory.stats.totalAnalyses >= 5) {
       memory.stats.experienceLevel = 'intermediate';
     }
-
     if (
       result.verdict === 'DANGER' &&
       txData.type === 'token_approve' &&
-      txData.spender
+      txData.spender &&
+      result.confidence >= 0.9 &&
+      result.reason.toLowerCase().includes('scam')
     ) {
       if (!memory.knowledgeBase.knownScams.includes(txData.spender)) {
         memory.knowledgeBase.knownScams.push(txData.spender);
       }
+    }
+    if (
+      result.verdict === 'WARNING' &&
+      txData.type === 'token_approve' &&
+      txData.spender &&
+      result.reason.toLowerCase().includes('known protocol')
+    ) {
+      memory.knowledgeBase.knownScams = memory.knowledgeBase.knownScams.filter(
+        (addr) => addr.toLowerCase() !== txData.spender!.toLowerCase(),
+      );
     }
 
     if (result.verdict === 'SAFE' && txData.tokenAddress) {
@@ -508,6 +549,21 @@ Respond only with a JSON object:
     }
 
     const uploadResult = await this.ogStorageService.uploadJson(memory);
+    const metadataHash = ethers.keccak256(
+      ethers.toUtf8Bytes(JSON.stringify(memory)),
+    );
+
+    const updateTx = (await this.contract.updateMemory(
+      tokenId,
+      uploadResult.rootHash,
+      metadataHash,
+    )) as ethers.TransactionResponse;
+
+    await updateTx.wait();
+
+    this.logger.log(
+      `On-chain memory pointer updated for Guardian #${tokenId}: ${uploadResult.rootHash}`,
+    );
 
     this.logger.log(
       `Updated memory for Guardian #${tokenId} uploaded to 0G Storage: ${uploadResult.rootHash}`,

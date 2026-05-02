@@ -1,9 +1,14 @@
 const hre = require("hardhat");
 
-const GUARDIAN_INFT_ADDRESS = "0xD94819E5540f8fa8229D5e7dC9726146FAAe06ba";
+const GUARDIAN_INFT_ADDRESS = process.env.GUARDIAN_INFT_ADDRESS;
+
+if (!GUARDIAN_INFT_ADDRESS) {
+  throw new Error("Missing GUARDIAN_INFT_ADDRESS in .env");
+}
 
 async function main() {
   console.log("\n🎨 Minting your first Guardian iNFT...\n");
+  console.log("📍 Contract:", GUARDIAN_INFT_ADDRESS);
 
   const [signer] = await hre.ethers.getSigners();
   console.log("📝 Minter:", signer.address);

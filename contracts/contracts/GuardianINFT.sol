@@ -34,6 +34,11 @@ contract GuardianINFT is ERC721, Ownable, ReentrancyGuard {
     event GuardianTransferred(uint256 indexed tokenId, address indexed from, address indexed to, bytes32 newHash);
     event UsageAuthorized(uint256 indexed tokenId, address indexed executor);
     event OracleUpdated(address indexed oldOracle, address indexed newOracle);
+    event GuardianMemoryUpdated(
+    uint256 indexed tokenId,
+    string newEncryptedURI,
+    bytes32 newMetadataHash
+);
 
     // === Constructor ===
 
@@ -115,6 +120,20 @@ contract GuardianINFT is ERC721, Ownable, ReentrancyGuard {
         address old = oracle;
         oracle = newOracle;
         emit OracleUpdated(old, newOracle);
+    }
+
+    function updateMemory(
+    uint256 tokenId,
+    string calldata newEncryptedURI,
+    bytes32 newMetadataHash
+    ) external {
+        require(ownerOf(tokenId) == msg.sender, "Not owner");
+        require(bytes(newEncryptedURI).length > 0, "Empty URI");
+
+        _encryptedURIs[tokenId] = newEncryptedURI;
+        _metadataHashes[tokenId] = newMetadataHash;
+
+        emit GuardianMemoryUpdated(tokenId, newEncryptedURI, newMetadataHash);
     }
 
     // === View functions ===
