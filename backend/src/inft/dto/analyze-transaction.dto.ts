@@ -1,36 +1,75 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+export type TransactionType =
+  | 'native_transfer' // ETH transfer (0G, BNB, etc.)
+  | 'token_transfer' // ERC-20 transfer
+  | 'token_approve' // ERC-20 approve
+  | 'contract_interaction'; // generic contract call
+
 export class AnalyzeTransactionDto {
   @ApiProperty({
-    description: 'Address of the contract being interacted with',
-    example: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    description: 'Type of transaction being analyzed',
+    enum: [
+      'native_transfer',
+      'token_transfer',
+      'token_approve',
+      'contract_interaction',
+    ],
+    example: 'token_approve',
   })
-  contractAddress!: string;
+  type!: TransactionType;
 
+  // ─── For native_transfer ─────────────────────────────
   @ApiProperty({
-    description: 'Function being called (decoded from calldata)',
-    example: 'approve(address,uint256)',
-  })
-  functionCall!: string;
-
-  @ApiProperty({
-    description: 'Value in wei being sent (0 for token interactions)',
-    example: '0',
-  })
-  value!: string;
-
-  @ApiProperty({
-    description: 'Optional decoded parameters as a JSON string',
-    example: '{"spender":"0xUniswapRouter","amount":"unlimited"}',
+    description:
+      'Recipient wallet address (for native_transfer and token_transfer)',
+    example: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
     required: false,
   })
-  decodedParams?: string;
+  recipient?: string;
 
   @ApiProperty({
     description:
-      'Optional context about the contract (age, verification status, etc.)',
-    example: 'Verified contract, deployed 2 years ago, 1.2M txs',
+      'Amount in wei (for native_transfer) or in token base units (for token_transfer)',
+    example: '1000000000000000000',
     required: false,
   })
-  contractContext?: string;
+  amount?: string;
+
+  // ─── For token_transfer / token_approve ──────────────
+  @ApiProperty({
+    description: 'ERC-20 token contract address',
+    example: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    required: false,
+  })
+  tokenAddress?: string;
+
+  @ApiProperty({
+    description: 'Spender address (for token_approve)',
+    example: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+    required: false,
+  })
+  spender?: string;
+
+  // ─── For contract_interaction (generic) ──────────────
+  @ApiProperty({
+    description: 'Contract address (for contract_interaction)',
+    example: '0x...',
+    required: false,
+  })
+  contractAddress?: string;
+
+  @ApiProperty({
+    description: 'Function signature being called (for contract_interaction)',
+    example: 'mint(address,uint256)',
+    required: false,
+  })
+  functionCall?: string;
+
+  @ApiProperty({
+    description: 'Decoded parameters (for contract_interaction)',
+    example: { to: '0x...', amount: '100' },
+    required: false,
+  })
+  params?: Record<string, string>;
 }

@@ -11,7 +11,11 @@ import { OgStorageService } from '../og-storage/og-storage.service';
 import { LlmRouterService } from '../llm/llm-router.service';
 import { AnalysisResultDto } from '../llm/dto/analysis-result.dto';
 import { AnalyzeTransactionDto } from './dto/analyze-transaction.dto';
-import { AgentMemory } from './interfaces/agent-memory.interface';
+import {
+  AgentHistoryEntry,
+  AgentMemory,
+} from './interfaces/agent-memory.interface';
+import { TransactionEnricherService } from '../transaction-enricher/transaction-enricher.service';
 import GuardianINFTArtifact from './abi/GuardianINFT.json';
 import { CreateGuardianDto } from './dto/create-guardian.dto';
 import {
@@ -29,6 +33,7 @@ export class InftService implements OnModuleInit {
     private readonly configService: ConfigService,
     private readonly ogStorageService: OgStorageService,
     private readonly llmRouter: LlmRouterService,
+    private readonly transactionEnricher: TransactionEnricherService,
   ) {}
 
   onModuleInit() {
@@ -71,14 +76,31 @@ export class InftService implements OnModuleInit {
       const nextTokenId = Number(totalMinted) + 1;
 
       // 3. Build initial memory JSON
+      const defaultSystemPrompt = `You are a blockchain transaction security analyzer.
+
+Your role is to evaluate transactions and classify them as SAFE, WARNING, or DANGER.
+
+You must base your decision only on observable facts:
+- transaction type
+- token or contract involved
+- permissions granted (if any)
+- known reputation (if available)
+- potential impact (loss, approval, control)
+
+Guidelines:
+- A transaction is SAFE when it does not give dangerous permissions and shows no malicious signals.
+- A transaction is WARNING when there is uncertainty, unknown entities, or moderate risk.
+- A transaction is DANGER when it can directly lead to loss of funds, such as malicious approvals or known scam patterns.
+
+Do not assume unknown equals malicious.
+Do not invent missing information.
+Be precise and realistic in your reasoning.`;
       const memory: AgentMemory = {
         agentName: dto.agentName ?? `Sentinel #${nextTokenId}`,
         version: '1.0.0',
         createdAt: new Date().toISOString(),
         owner: recipient,
-        systemPrompt:
-          dto.systemPrompt ??
-          'You are a wallet guardian. Analyze transactions for safety and warn the user about scams, phishing contracts, and risky approvals.',
+        systemPrompt: defaultSystemPrompt,
         knowledgeBase: {
           knownSafeContracts: [],
           knownScams: [],
@@ -191,13 +213,18 @@ export class InftService implements OnModuleInit {
     tokenId: number,
     txData: AnalyzeTransactionDto,
   ): Promise<AnalysisResultDto> {
-    this.logger.log(`Analyzing transaction for Guardian #${tokenId}`);
+    this.logger.log(
+      `Analyzing transaction (type: ${txData.type}) for Guardian #${tokenId}`,
+    );
 
     // 1. Récupère la mémoire de l'agent depuis 0G Storage
     let memory: AgentMemory;
     try {
       const rawMemory = await this.getInftMemory(tokenId);
-      memory = rawMemory as AgentMemory; // cast: la mémoire qu'on upload respecte cette structure
+      memory = rawMemory as AgentMemory;
+      this.logger.log(
+        `Memory loaded for Guardian #${tokenId} — analyses: ${memory.stats.totalAnalyses}`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new NotFoundException(
@@ -205,53 +232,285 @@ export class InftService implements OnModuleInit {
       );
     }
 
-    // 2. Construit le prompt
-    const prompt = this.buildAnalysisPrompt(memory, txData);
+    // 2. Build context based on transaction type
+    let context: string;
+    switch (txData.type) {
+      case 'native_transfer':
+        context = this.buildNativeTransferContext(txData);
+        break;
+      case 'token_transfer':
+        context = await this.buildTokenTransferContext(txData);
+        break;
+      case 'token_approve':
+        context = await this.buildApproveContext(txData);
+        break;
+      case 'contract_interaction':
+        context = await this.buildContractContext(txData);
+        break;
+      default:
+        throw new InternalServerErrorException(
+          `Unknown transaction type: ${String(txData.type)}`,
+        );
+    }
+
+    // 3. Construit le prompt avec mémoire + contexte
+    const prompt = this.buildAnalysisPrompt(memory, context);
     this.logger.log(`Built prompt (${prompt.length} chars), calling LLM...`);
 
-    // 3. Appelle le LLM via le router
+    // 4. Appelle le LLM via le router
     const result = await this.llmRouter.analyze(prompt);
 
     this.logger.log(
       `LLM verdict: ${result.verdict} (provider: ${result.providerUsed}, ${result.responseTimeMs}ms)`,
     );
 
+    await this.updateMemoryAfterAnalysis(tokenId, memory, txData, result);
+
     return result;
   }
 
   /**
-   * Builds the prompt for the LLM, combining the agent's memory and the transaction data.
+   * Builds context for a native ETH/0G transfer.
+   * No contract enrichment needed (no contract involved).
    */
-  private buildAnalysisPrompt(
-    memory: AgentMemory,
+  private buildNativeTransferContext(txData: AnalyzeTransactionDto): string {
+    if (!txData.recipient || !txData.amount) {
+      throw new InternalServerErrorException(
+        'native_transfer requires "recipient" and "amount"',
+      );
+    }
+
+    const amountInEth = (Number(txData.amount) / 1e18).toFixed(6);
+
+    return `# TRANSACTION TYPE: Native ETH Transfer
+- Recipient address: ${txData.recipient}
+- Amount: ${amountInEth} ETH (${txData.amount} wei)
+- No smart contract involved (direct value transfer at protocol level)
+
+Note: Native transfers cannot be analyzed via Etherscan contract data 
+(there is no contract). Risk assessment focuses on:
+- Is the recipient a known address (from your memory)?
+- Is the amount unusually large?
+- Are there patterns matching known scams?`;
+  }
+
+  /**
+   * Builds context for an ERC-20 token transfer.
+   * Enriches the token contract with Etherscan.
+   */
+  private async buildTokenTransferContext(
     txData: AnalyzeTransactionDto,
-  ): string {
+  ): Promise<string> {
+    if (!txData.tokenAddress || !txData.recipient || !txData.amount) {
+      throw new InternalServerErrorException(
+        'token_transfer requires "tokenAddress", "recipient" and "amount"',
+      );
+    }
+
+    const enriched = await this.transactionEnricher.enrich(
+      txData.tokenAddress,
+      'transfer(address,uint256)',
+      { to: txData.recipient, amount: txData.amount },
+    );
+
+    return `# TRANSACTION TYPE: ERC-20 Token Transfer
+
+${enriched.summary}
+
+Note: This is a simple ERC-20 token transfer.
+The user is sending tokens to a recipient. No spending permission is granted.
+
+Important rules:
+- Do NOT classify as DANGER only because the recipient is unknown.
+- If the token is legitimate and the amount is normal, classify as SAFE or WARNING.
+- Use WARNING only if the recipient is unknown, the amount is unusually high, or the token looks suspicious.
+- DANGER is reserved for known scam addresses, malicious contracts, phishing patterns, or abnormal high-risk signals.`;
+  }
+
+  /**
+   * Builds context for an ERC-20 approve.
+   * Enriches both the token and the spender.
+   */
+  private async buildApproveContext(
+    txData: AnalyzeTransactionDto,
+  ): Promise<string> {
+    if (!txData.tokenAddress || !txData.spender || !txData.amount) {
+      throw new InternalServerErrorException(
+        'token_approve requires "tokenAddress", "spender" and "amount"',
+      );
+    }
+
+    const enriched = await this.transactionEnricher.enrich(
+      txData.tokenAddress,
+      'approve(address,uint256)',
+      { spender: txData.spender, amount: txData.amount },
+    );
+
+    return `# TRANSACTION TYPE: ERC-20 Approve
+
+${enriched.summary}
+
+Note: This is an ERC-20 approval.
+The user gives permission to a spender to use tokens later.
+
+Important rules:
+- Unlimited approval to an unknown or unverified spender => DANGER.
+- Unlimited approval to a well-known trusted protocol => WARNING, not DANGER.
+- Limited approval to a known protocol => SAFE or WARNING.
+- DANGER must be used only when the spender is unknown, suspicious, unverified, or matches scam patterns.`;
+  }
+
+  /**
+   * Builds context for a generic contract interaction.
+   */
+  private async buildContractContext(
+    txData: AnalyzeTransactionDto,
+  ): Promise<string> {
+    if (!txData.contractAddress || !txData.functionCall) {
+      throw new InternalServerErrorException(
+        'contract_interaction requires "contractAddress" and "functionCall"',
+      );
+    }
+
+    const enriched = await this.transactionEnricher.enrich(
+      txData.contractAddress,
+      txData.functionCall,
+      txData.params ?? {},
+    );
+
+    return `# TRANSACTION TYPE: Generic Contract Interaction
+
+${enriched.summary}
+
+Note: This is an arbitrary contract call. Without specific patterns to match,
+risk assessment focuses on contract verification, age, and reputation.`;
+  }
+
+  /**
+   * Builds the final LLM prompt combining agent memory + transaction context.
+   */
+  private buildAnalysisPrompt(memory: AgentMemory, context: string): string {
     const knownSafe = memory.knowledgeBase.knownSafeContracts;
     const knownScams = memory.knowledgeBase.knownScams;
+    const patterns = memory.knowledgeBase.patternsLearned;
+    const recentHistory = memory.history.slice(-5);
     const stats = memory.stats;
 
     return `${memory.systemPrompt}
 
-# YOUR MEMORY (from previous experience)
-- Total transactions analyzed so far: ${stats.totalAnalyses}
+# AGENT MEMORY
+- Total transactions analyzed: ${stats.totalAnalyses}
 - Scams blocked: ${stats.scamsBlocked}
 - Experience level: ${stats.experienceLevel}
-- Known SAFE contracts: ${knownSafe.length > 0 ? knownSafe.join(', ') : '(none yet)'}
-- Known SCAM contracts: ${knownScams.length > 0 ? knownScams.join(', ') : '(none yet)'}
 
-# TRANSACTION TO ANALYZE
-- Target contract: ${txData.contractAddress}
-- Function: ${txData.functionCall}
-- Value (wei): ${txData.value}
-${txData.decodedParams ? `- Decoded params: ${txData.decodedParams}` : ''}
-${txData.contractContext ? `- Contract context: ${txData.contractContext}` : ''}
+# KNOWN SAFE CONTRACTS
+${knownSafe.length > 0 ? knownSafe.join('\n') : '(none yet)'}
 
-# YOUR TASK
-Analyze this transaction. Consider:
-- Is the contract address known safe or scam from memory?
-- Is the function call risky (e.g., unlimited approval, transferFrom to suspicious address)?
-- Are there red flags (unverified contract, fresh deployment, unusual params)?
+# KNOWN SCAM ADDRESSES
+${knownScams.length > 0 ? knownScams.join('\n') : '(none yet)'}
 
-Respond with a JSON object: {"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "1-2 sentences", "confidence": 0.0-1.0}`;
+# PATTERNS LEARNED
+${patterns.length > 0 ? patterns.join('\n') : '(none yet)'}
+
+# RECENT ANALYSIS HISTORY
+${recentHistory.length > 0 ? JSON.stringify(recentHistory, null, 2) : '(none yet)'}
+
+# CURRENT TRANSACTION CONTEXT
+${context}
+
+# DECISION FRAMEWORK
+Classify the transaction as SAFE, WARNING, or DANGER.
+
+Use SAFE when:
+- the transaction does not grant dangerous permissions;
+- no scam or malicious pattern is detected;
+- uncertainty is low.
+
+Use WARNING when:
+- there is uncertainty;
+- an address or contract is unknown;
+- an approval or contract interaction requires caution;
+- the risk is possible but not clearly malicious.
+
+Use DANGER when:
+- the transaction can directly enable loss of funds;
+- the spender or contract matches a known scam;
+- the transaction matches a wallet-drain or phishing pattern;
+- there is strong evidence of malicious behavior.
+
+Important:
+- Do not invent facts.
+- Do not assume unknown means malicious.
+- Explain your reasoning using the provided facts and memory.
+- If you are uncertain, prefer WARNING over DANGER.
+
+Respond only with a JSON object:
+{"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "1-2 sentences", "confidence": 0.0-1.0}`;
+  }
+
+  private async updateMemoryAfterAnalysis(
+    tokenId: number,
+    memory: AgentMemory,
+    txData: AnalyzeTransactionDto,
+    result: AnalysisResultDto,
+  ): Promise<void> {
+    const analyzedAt = new Date().toISOString();
+
+    const historyEntry: AgentHistoryEntry = {
+      timestamp: analyzedAt,
+      contractAddress:
+        txData.contractAddress ??
+        txData.tokenAddress ??
+        txData.recipient ??
+        'N/A',
+      functionCall: txData.functionCall ?? txData.type,
+      verdict: result.verdict,
+      reason: result.reason,
+    };
+
+    memory.history.push(historyEntry);
+
+    memory.stats.totalAnalyses += 1;
+
+    if (result.verdict === 'DANGER') {
+      memory.stats.scamsBlocked += 1;
+    }
+
+    if (memory.stats.totalAnalyses >= 20) {
+      memory.stats.experienceLevel = 'expert';
+    } else if (memory.stats.totalAnalyses >= 5) {
+      memory.stats.experienceLevel = 'intermediate';
+    }
+
+    if (
+      result.verdict === 'DANGER' &&
+      txData.type === 'token_approve' &&
+      txData.spender
+    ) {
+      if (!memory.knowledgeBase.knownScams.includes(txData.spender)) {
+        memory.knowledgeBase.knownScams.push(txData.spender);
+      }
+    }
+
+    if (result.verdict === 'SAFE' && txData.tokenAddress) {
+      if (
+        !memory.knowledgeBase.knownSafeContracts.includes(txData.tokenAddress)
+      ) {
+        memory.knowledgeBase.knownSafeContracts.push(txData.tokenAddress);
+      }
+    }
+
+    if (result.verdict === 'DANGER') {
+      const pattern = `Dangerous ${txData.type}: ${result.reason}`;
+      if (!memory.knowledgeBase.patternsLearned.includes(pattern)) {
+        memory.knowledgeBase.patternsLearned.push(pattern);
+      }
+    }
+
+    const uploadResult = await this.ogStorageService.uploadJson(memory);
+
+    this.logger.log(
+      `Updated memory for Guardian #${tokenId} uploaded to 0G Storage: ${uploadResult.rootHash}`,
+    );
   }
 }

@@ -16,11 +16,11 @@ export class CreateGuardianDto {
   })
   agentName?: string;
 
-  @ApiProperty({
+  /* @ApiProperty({
     description:
       'Custom system prompt for the AI guardian (defaults to standard prompt)',
     example: 'You are a vigilant wallet guardian focused on DeFi risks.',
     required: false,
   })
-  systemPrompt?: string;
+  systemPrompt?: string;*/
 }
