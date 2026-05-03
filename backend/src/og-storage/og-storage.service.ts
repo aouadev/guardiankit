@@ -7,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Indexer, MemData } from '@0gfoundation/0g-ts-sdk';
 import { ethers } from 'ethers';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Result returned by indexer.upload() in @0gfoundation/0g-ts-sdk v1.2.6
@@ -49,9 +51,22 @@ export class OgStorageService implements OnModuleInit {
   }
 
   /**
-   * Uploads JSON data to 0G Storage.
-   * @param data Any JSON-serializable object
-   * @returns rootHash + tx info
+   * Saves a local copy of data under local-storage/<rootHash>.json.
+   * Called before every 0G upload so there is always a local backup.
+   */
+  saveLocalCopy(rootHash: string, data: Record<string, any>): void {
+    const dir = path.join(process.cwd(), 'local-storage');
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const filePath = path.join(dir, `${rootHash}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    this.logger.log(`Local memory saved at: ${filePath}`);
+  }
+
+  /**
+   * Uploads JSON data to 0G Storage with a local backup written first.
+   * Falls back to local-only mode if 0G upload fails or times out.
    */
   async uploadJson(data: Record<string, any>): Promise<{
     rootHash: string;
@@ -59,41 +74,45 @@ export class OgStorageService implements OnModuleInit {
     txSeq?: number;
     size: number;
     uploadedAt: string;
+    storageMode: '0g' | 'local';
   }> {
+    // 1. Serialize the JSON
+    const serialized = JSON.stringify(data);
+    const bytes = new TextEncoder().encode(serialized);
+    this.logger.log(`Uploading ${bytes.length} bytes to 0G Storage...`);
+
+    // 2. Wrap in MemData
+    const memData = new MemData(bytes);
+
+    // 3. Compute the Merkle tree to get the rootHash
+    const [tree, treeErr] = await memData.merkleTree();
+    if (treeErr !== null || !tree) {
+      throw new InternalServerErrorException(
+        `Merkle tree generation failed: ${String(treeErr)}`,
+      );
+    }
+    const rootHash = tree.rootHash() ?? '';
+    this.logger.log(`Computed rootHash: ${rootHash}`);
+
+    // 4. Save local copy BEFORE attempting 0G upload
+    this.saveLocalCopy(rootHash, data);
+
+    // 5. Attempt 0G upload with timeout
     try {
-      // 1. Serialize the JSON
-      const serialized = JSON.stringify(data);
-      const bytes = new TextEncoder().encode(serialized);
-      this.logger.log(`Uploading ${bytes.length} bytes to 0G Storage...`);
-
-      // 2. Wrap in MemData (in-memory data wrapper for 0G SDK)
-      const memData = new MemData(bytes);
-
-      // 3. Compute the Merkle tree to get the rootHash before upload
-      const [tree, treeErr] = await memData.merkleTree();
-      if (treeErr !== null || !tree) {
-        throw new Error(`Merkle tree generation failed: ${String(treeErr)}`);
-      }
-      const rootHash = tree.rootHash() ?? '';
-      this.logger.log(`Computed rootHash: ${rootHash}`);
-
-      // 4. Upload to 0G Storage network
-      const [tx, uploadErr] = await this.indexer.upload(
-        memData,
-        this.rpcUrl,
-        this.signer,
+      const [tx, uploadErr] = await this.withTimeout(
+        this.indexer.upload(memData, this.rpcUrl, this.signer),
+        30000,
       );
       if (uploadErr !== null) {
         throw new Error(`Upload failed: ${String(uploadErr)}`);
       }
 
-      // 5. Parse SDK response
       const txResult = tx as unknown as UploadTxResult;
       const cleanTxHash = txResult?.txHash ?? '';
       const txSeq = txResult?.txSeq;
 
       this.logger.log(
-        `Upload successful — txHash: ${cleanTxHash}, txSeq: ${txSeq}`,
+        `Storage mode: 0G — txHash: ${cleanTxHash}, txSeq: ${txSeq}`,
       );
 
       return {
@@ -102,50 +121,78 @@ export class OgStorageService implements OnModuleInit {
         txSeq,
         size: bytes.length,
         uploadedAt: new Date().toISOString(),
+        storageMode: '0g',
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`uploadJson failed: ${message}`);
-      throw new InternalServerErrorException(
-        `0G Storage upload failed: ${message}`,
+      this.logger.warn(
+        `0G Storage upload failed, using local fallback: ${message}`,
       );
+      this.logger.warn(`Storage mode: LOCAL`);
+
+      return {
+        rootHash,
+        txHash: `local-${rootHash}`,
+        txSeq: undefined,
+        size: bytes.length,
+        uploadedAt: new Date().toISOString(),
+        storageMode: 'local',
+      };
     }
   }
 
   /**
-   * Downloads JSON data from 0G Storage by its rootHash.
-   * @param rootHash The unique identifier returned by uploadJson
-   * @returns The original data parsed back to JSON
+   * Downloads JSON data from 0G Storage, falling back to local file if needed.
    */
   async downloadJson(rootHash: string): Promise<Record<string, any>> {
+    // 1. Try 0G Storage first
     try {
       this.logger.log(`Downloading from 0G Storage: ${rootHash}`);
 
-      // SDK requires a file path for download in Node.js — use OS temp dir
-      const fs = await import('fs');
-      const path = await import('path');
       const os = await import('os');
       const tempPath = path.join(os.tmpdir(), `0g-download-${Date.now()}.json`);
 
-      // Download with merkle proof verification (true = verify integrity)
       const err = await this.indexer.download(rootHash, tempPath, true);
       if (err !== null) {
         throw new Error(`Download failed: ${String(err)}`);
       }
 
-      // Read the downloaded file and parse JSON
       const content = fs.readFileSync(tempPath, 'utf-8');
-      fs.unlinkSync(tempPath); // cleanup temp file
+      fs.unlinkSync(tempPath);
 
-      const parsed = JSON.parse(content) as Record<string, any>;
-      this.logger.log(`Successfully downloaded and parsed data`);
-      return parsed;
+      this.logger.log(`Storage mode: 0G — download successful`);
+      return JSON.parse(content) as Record<string, any>;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`downloadJson failed: ${message}`);
-      throw new InternalServerErrorException(
-        `0G Storage download failed: ${message}`,
-      );
+      this.logger.warn(`0G download failed, using local fallback: ${message}`);
     }
+
+    // 2. Fall back to local file
+    const localPath = path.join(
+      process.cwd(),
+      'local-storage',
+      `${rootHash}.json`,
+    );
+    if (fs.existsSync(localPath)) {
+      const content = fs.readFileSync(localPath, 'utf-8');
+      this.logger.log(`Storage mode: LOCAL — reading from ${localPath}`);
+      return JSON.parse(content) as Record<string, any>;
+    }
+
+    throw new InternalServerErrorException(
+      `Memory not found for rootHash ${rootHash} (0G failed, no local backup)`,
+    );
+  }
+
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`0G Storage timeout after ${ms / 1000}s`)),
+          ms,
+        ),
+      ),
+    ]);
   }
 }

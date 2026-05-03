@@ -87,14 +87,35 @@ You must base your decision only on observable facts:
 - known reputation (if available)
 - potential impact (loss, approval, control)
 
-Guidelines:
-- A transaction is SAFE when it does not give dangerous permissions and shows no malicious signals.
-- A transaction is WARNING when there is uncertainty, unknown entities, or moderate risk.
-- A transaction is DANGER when it can directly lead to loss of funds, such as malicious approvals or known scam patterns.
+## Rules by transaction type
 
-Do not assume unknown equals malicious.
-Do not invent missing information.
-Be precise and realistic in your reasoning.`;
+### Native transfer (ETH/0G sent directly to a wallet)
+- Default verdict: SAFE.
+- No smart contract is involved, so the attack surface is minimal.
+- Upgrade to WARNING only if the recipient is in your known scam list.
+- Never classify a small or normal native transfer as WARNING just because the recipient is unknown.
+
+### Token transfer (ERC-20 sent to a recipient)
+- If the token is a well-known verified token (USDC, DAI, WETH, etc.): SAFE.
+- If the token is unverified or very recently deployed: WARNING.
+- Unknown recipient alone is not a reason for WARNING.
+
+### Token approve (granting a spender permission to use tokens)
+- Known, verified protocol (Uniswap, Aave, Compound, etc.) + limited amount: SAFE.
+- Known, verified protocol + unlimited amount: WARNING.
+- Unknown or unverified spender + any amount: WARNING.
+- Unknown or unverified spender + unlimited amount: DANGER.
+- Spender deployed less than 7 days ago: DANGER regardless of approval amount.
+
+### Contract interaction
+- Verified contract with a standard function: SAFE or WARNING depending on context.
+- Unverified or fresh contract: WARNING or DANGER depending on the function called.
+
+## General principles
+- Unknown does not mean malicious.
+- Do not invent missing information.
+- Be precise and calibrated: reserve DANGER for real, concrete threats.
+- If you are uncertain between SAFE and WARNING, prefer SAFE for transfers and WARNING for approvals.`;
       const memory: AgentMemory = {
         agentName: dto.agentName ?? `Sentinel #${nextTokenId}`,
         version: '1.0.0',
@@ -452,27 +473,30 @@ ${context}
 Classify the transaction as SAFE, WARNING, or DANGER.
 
 Use SAFE when:
-- the transaction does not grant dangerous permissions;
-- no scam or malicious pattern is detected;
-- uncertainty is low.
+- native transfer to any wallet not in the known scam list;
+- token transfer of a verified token to any recipient;
+- approval to a known, verified protocol with a limited amount;
+- no dangerous permissions are granted and no malicious signal is present.
 
 Use WARNING when:
-- there is uncertainty;
-- an address or contract is unknown;
-- an approval or contract interaction requires caution;
-- the risk is possible but not clearly malicious.
+- approval to a known protocol with an unlimited amount;
+- approval to an unknown/unverified spender with a limited amount;
+- token transfer involving an unverified token;
+- contract interaction with uncertain risk.
 
 Use DANGER when:
-- the transaction can directly enable loss of funds;
-- the spender or contract matches a known scam;
+- approval to an unknown/unverified spender with an unlimited amount;
+- spender or recipient is in the known scam list;
+- spender contract is less than 7 days old;
 - the transaction matches a wallet-drain or phishing pattern;
-- there is strong evidence of malicious behavior.
+- there is strong, concrete evidence of malicious behavior.
 
 Important:
 - Do not invent facts.
-- Do not assume unknown means malicious.
+- Unknown recipient or contract alone is NOT sufficient for WARNING on transfers.
+- Unknown spender on an approval IS sufficient for at least WARNING.
 - Explain your reasoning using the provided facts and memory.
-- If you are uncertain, prefer WARNING over DANGER.
+- If uncertain between SAFE and WARNING: prefer SAFE for transfers, WARNING for approvals.
 
 Respond only with a JSON object:
 {"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "1-2 sentences", "confidence": 0.0-1.0}`;
