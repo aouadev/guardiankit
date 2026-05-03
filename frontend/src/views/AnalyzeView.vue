@@ -264,14 +264,14 @@ const verdictEmoji = computed(() => {
     <div class="card">
       <h2>Try with example</h2>
       <div class="example-row mt-sm">
-        <button class="btn example-btn safe" @click="loadExample('safe')">
-          ✅ SAFE — 0.01 ETH transfer
+        <button class="btn btn-secondary example-btn" @click="loadExample('safe')">
+          0.01 ETH transfer
         </button>
-        <button class="btn example-btn warning" @click="loadExample('warning')">
-          ⚠️ WARNING — Unlimited USDC → Uniswap V3
+        <button class="btn btn-secondary example-btn" @click="loadExample('warning')">
+          Unlimited USDC approval to Uniswap V3
         </button>
-        <button class="btn example-btn danger" @click="loadExample('danger')">
-          🚨 DANGER — Unlimited USDC → Unknown
+        <button class="btn btn-secondary example-btn" @click="loadExample('danger')">
+          Unlimited USDC approval to unknown spender
         </button>
       </div>
     </div>
@@ -374,11 +374,7 @@ const verdictEmoji = computed(() => {
 
 /* Examples */
 .example-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.example-btn { font-size: 0.8rem; padding: 7px 12px; background: transparent; }
-.example-btn.safe   { border: 1px solid rgba(16,185,129,0.5); color: var(--safe); }
-.example-btn.warning { border: 1px solid rgba(245,158,11,0.5); color: var(--warning); }
-.example-btn.danger  { border: 1px solid rgba(239,68,68,0.5); color: var(--danger); }
-.example-btn:hover { opacity: 0.75; }
+.example-btn { font-size: 0.8rem; padding: 7px 12px; }
 
 /* Submit spinner */
 .btn .spinner, .full .spinner {

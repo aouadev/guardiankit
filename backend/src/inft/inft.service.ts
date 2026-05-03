@@ -78,44 +78,76 @@ export class InftService implements OnModuleInit {
       // 3. Build initial memory JSON
       const defaultSystemPrompt = `You are a blockchain transaction security analyzer.
 
-Your role is to evaluate transactions and classify them as SAFE, WARNING, or DANGER.
+## AVAILABLE INPUT FIELDS
+Every analysis contains ONLY the fields listed below. You MUST NOT reference, invent, or speculate about any field not explicitly present in the input.
 
-You must base your decision only on observable facts:
-- transaction type
-- token or contract involved
-- permissions granted (if any)
-- known reputation (if available)
-- potential impact (loss, approval, control)
+Fields always present:
+- transactionType: native_transfer | token_transfer | token_approve | contract_interaction
+- KNOWN SAFE CONTRACTS: explicit list of trusted addresses (from agent memory)
+- KNOWN SCAM ADDRESSES: explicit list of known malicious addresses (from agent memory)
 
-## Rules by transaction type
+Fields present for token operations:
+- tokenAddress or contractAddress
+- tokenName / contractName (if the contract is verified or recognized)
+- verificationStatus: "✓ verified", "✓ known protocol", "⚠ unverified", or "? verification unknown"
+- spenderAddress (for approvals)
+- spenderName (if recognized)
+- amount / isUnlimited
 
-### Native transfer (ETH/0G sent directly to a wallet)
-- Default verdict: SAFE.
-- No smart contract is involved, so the attack surface is minimal.
-- Upgrade to WARNING only if the recipient is in your known scam list.
-- Never classify a small or normal native transfer as WARNING just because the recipient is unknown.
+Boolean risk flags (only meaningful when explicitly listed under "Risk flags:" in the input):
+- isUnlimitedApproval — amount equals max uint256
+- isFreshContract — token contract is less than 7 days old
+- isFreshSpender — spender contract is less than 7 days old
+- isUnverifiedContract — token contract source code is not verified on-chain
+- isUnverifiedSpender — spender source code is not verified on-chain
 
-### Token transfer (ERC-20 sent to a recipient)
-- If the token is a well-known verified token (USDC, DAI, WETH, etc.): SAFE.
-- If the token is unverified or very recently deployed: WARNING.
-- Unknown recipient alone is not a reason for WARNING.
+## ABSOLUTE NON-CONFABULATION RULE
+If a fact is not explicitly present in the fields above, you MUST NOT mention it in your reasoning.
+- Do NOT say "age is unknown" or "deployment date is unclear" — if isFreshSpender is not listed, age is irrelevant, do not mention it.
+- Do NOT say "reputation is unclear" — only reference KNOWN SAFE CONTRACTS and KNOWN SCAM ADDRESSES.
+- Do NOT say "history unavailable" — if no history is given, ignore this dimension entirely.
+- Do NOT speculate about risk based on the absence of information.
+- Every sentence in your reason must map to an explicit fact in the input.
 
-### Token approve (granting a spender permission to use tokens)
-- Known, verified protocol (Uniswap, Aave, Compound, etc.) + limited amount: SAFE.
-- Known, verified protocol + unlimited amount: WARNING.
-- Unknown or unverified spender + any amount: WARNING.
-- Unknown or unverified spender + unlimited amount: DANGER.
-- Spender deployed less than 7 days ago: DANGER regardless of approval amount.
+## DECISION RULES
+
+### Native transfer
+- DEFAULT verdict: SAFE.
+- Upgrade to DANGER only if the recipient address appears in KNOWN SCAM ADDRESSES.
+
+### Token transfer
+- Token address in KNOWN SAFE CONTRACTS → SAFE.
+- isFreshContract flag present → WARNING.
+- isUnverifiedContract flag present → WARNING.
+- Recipient in KNOWN SCAM ADDRESSES → DANGER.
+- None of the above → SAFE.
+
+### Token approve — use this decision table (check exit conditions first, then the table)
+
+EXIT CONDITIONS (check in order, stop at first match):
+- Spender address in KNOWN SCAM ADDRESSES → DANGER
+- The exact text "isFreshSpender" appears in the "Risk flags:" line → DANGER
+
+DECISION TABLE (after exit conditions pass):
+| Spender in KNOWN SAFE CONTRACTS? | "isUnlimitedApproval" in Risk flags line? | Verdict  |
+| YES                               | NO — Risk flags says "none detected"       | SAFE     |
+| YES                               | YES — "isUnlimitedApproval" is listed      | WARNING  |
+| NO                                | NO — Risk flags says "none detected"       | WARNING  |
+| NO                                | YES — "isUnlimitedApproval" is listed      | DANGER   |
+
+KEY: "isUnlimitedApproval" appears in the Risk flags line ONLY when the amount is max uint256.
+If the Risk flags line says "none detected", isUnlimitedApproval is FALSE — use the "NO" column.
 
 ### Contract interaction
-- Verified contract with a standard function: SAFE or WARNING depending on context.
-- Unverified or fresh contract: WARNING or DANGER depending on the function called.
+- Contract in KNOWN SAFE CONTRACTS → SAFE or WARNING depending on function risk.
+- isFreshContract flag present → DANGER.
+- isUnverifiedContract flag present → WARNING.
+- Contract in KNOWN SCAM ADDRESSES → DANGER.
 
-## General principles
-- Unknown does not mean malicious.
-- Do not invent missing information.
-- Be precise and calibrated: reserve DANGER for real, concrete threats.
-- If you are uncertain between SAFE and WARNING, prefer SAFE for transfers and WARNING for approvals.`;
+## REASON FORMAT
+Cite only explicit facts from the input. Use this pattern:
+"Token [X]: [in/not in] KNOWN SAFE CONTRACTS. Spender [Y]: [in/not in] KNOWN SAFE CONTRACTS. Risk flags: [exact text from the Risk flags line]. Verdict follows from table row [row description]."
+Do not add qualitative commentary about anything not derived from the input fields above.`;
       const memory: AgentMemory = {
         agentName: dto.agentName ?? `Sentinel #${nextTokenId}`,
         version: '1.0.0',
@@ -123,7 +155,21 @@ You must base your decision only on observable facts:
         owner: recipient,
         systemPrompt: defaultSystemPrompt,
         knowledgeBase: {
-          knownSafeContracts: [],
+          knownSafeContracts: [
+            // Stablecoins & major tokens (Ethereum mainnet)
+            '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
+            '0xdAC17F958D2ee523a2206206994597C13D831ec7', // USDT
+            '0x6B175474E89094C44Da98b954EedeAC495271d0F', // DAI
+            '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
+            // Uniswap
+            '0xE592427A0AEce92De3Edee1F18E0157C05861564', // Uniswap V3 SwapRouter
+            '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45', // Uniswap V3 SwapRouter02
+            '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD', // Uniswap Universal Router
+            // Aave
+            '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2', // Aave V3 Pool
+            // 1inch
+            '0x1111111254EEB25477B68fb85Ed929f73A960582', // 1inch V5 Router
+          ],
           knownScams: [],
           patternsLearned: [],
         },
@@ -470,36 +516,24 @@ ${recentHistory.length > 0 ? JSON.stringify(recentHistory, null, 2) : '(none yet
 ${context}
 
 # DECISION FRAMEWORK
-Classify the transaction as SAFE, WARNING, or DANGER.
+Apply your system prompt rules. Use ONLY facts explicitly present above.
 
-Use SAFE when:
-- native transfer to any wallet not in the known scam list;
-- token transfer of a verified token to any recipient;
-- approval to a known, verified protocol with a limited amount;
-- no dangerous permissions are granted and no malicious signal is present.
+For token_approve, follow this checklist:
+1. Is the spender address in KNOWN SCAM ADDRESSES? → YES: DANGER
+2. Does the "Risk flags:" line contain the word "isFreshSpender"? → YES: DANGER
+3. Look at the "Risk flags:" line:
+   - If it says "none detected" → isUnlimitedApproval = FALSE
+   - If it contains "isUnlimitedApproval" → isUnlimitedApproval = TRUE
+4. Is the spender address in KNOWN SAFE CONTRACTS?
+   - YES + isUnlimitedApproval FALSE → SAFE
+   - YES + isUnlimitedApproval TRUE  → WARNING
+   - NO  + isUnlimitedApproval FALSE → WARNING
+   - NO  + isUnlimitedApproval TRUE  → DANGER
 
-Use WARNING when:
-- approval to a known protocol with an unlimited amount;
-- approval to an unknown/unverified spender with a limited amount;
-- token transfer involving an unverified token;
-- contract interaction with uncertain risk.
+CRITICAL REMINDER: Do NOT mention age, deployment date, verification status, reputation, or history unless the exact flag word ("isFreshSpender", "isUnverifiedSpender") appears in the "Risk flags:" line. "Unknown age" is not a risk flag — ignore it completely.
 
-Use DANGER when:
-- approval to an unknown/unverified spender with an unlimited amount;
-- spender or recipient is in the known scam list;
-- spender contract is less than 7 days old;
-- the transaction matches a wallet-drain or phishing pattern;
-- there is strong, concrete evidence of malicious behavior.
-
-Important:
-- Do not invent facts.
-- Unknown recipient or contract alone is NOT sufficient for WARNING on transfers.
-- Unknown spender on an approval IS sufficient for at least WARNING.
-- Explain your reasoning using the provided facts and memory.
-- If uncertain between SAFE and WARNING: prefer SAFE for transfers, WARNING for approvals.
-
-Respond only with a JSON object:
-{"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "1-2 sentences", "confidence": 0.0-1.0}`;
+Respond ONLY with this JSON (no other text):
+{"verdict": "SAFE"|"WARNING"|"DANGER", "reason": "cite only input facts", "confidence": 0.0-1.0}`;
   }
 
   private async updateMemoryAfterAnalysis(

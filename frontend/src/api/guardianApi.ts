@@ -66,8 +66,36 @@ export function createSentinel(
   })
 }
 
+export interface AgentMemory {
+  agentName: string
+  version: string
+  createdAt: string
+  owner: string
+  stats: {
+    totalAnalyses: number
+    scamsBlocked: number
+    experienceLevel: 'novice' | 'intermediate' | 'expert'
+  }
+  knowledgeBase: {
+    knownSafeContracts: string[]
+    knownScams: string[]
+    patternsLearned: string[]
+  }
+  history: Array<{
+    timestamp: string
+    contractAddress: string
+    functionCall: string
+    verdict: string
+    reason: string
+  }>
+}
+
 export function getSentinel(tokenId: number): Promise<SentinelInfo> {
   return apiFetch(`/inft/${tokenId}`)
+}
+
+export function getSentinelMemory(tokenId: number): Promise<AgentMemory> {
+  return apiFetch(`/inft/${tokenId}/memory`)
 }
 
 export function analyzeTx(tokenId: number, payload: TxPayload): Promise<AnalysisResult> {
