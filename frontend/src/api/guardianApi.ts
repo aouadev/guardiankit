@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:3000'
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
 
 export interface CreateSentinelResponse {
   tokenId: number
@@ -27,11 +27,7 @@ export interface AnalysisResult {
   responseTimeMs: number
 }
 
-export type TxType =
-  | 'native_transfer'
-  | 'token_transfer'
-  | 'token_approve'
-  | 'contract_interaction'
+export type TxType = 'native_transfer' | 'token_transfer' | 'token_approve' | 'contract_interaction'
 
 export interface TxPayload {
   type: TxType
